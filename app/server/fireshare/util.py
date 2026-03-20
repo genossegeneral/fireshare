@@ -553,7 +553,20 @@ def _get_encoder_candidates(use_gpu=False, encoder_preference='auto'):
             '-profile:v', 'high'
         ]
     }
-
+    av1_vaapi = {
+        'name': 'AV1 VA-API',
+        'video_codec': 'av1_vaapi',
+        'audio_codec': 'libopus',
+        'audio_bitrate': '96k',
+        'extra_args': [
+            '-init_hw_device', 'vaapi',
+            '-vf', 'format=nv12,hwupload',
+            '-rc_mode', 'CQP',
+            '-global_quality:v:0', '164',
+            '-compression_level', '4',
+            '-profile:v', 'main'
+        ]
+    }
 
     if encoder_preference == 'h264':
         if use_gpu:
@@ -561,7 +574,7 @@ def _get_encoder_candidates(use_gpu=False, encoder_preference='auto'):
         return [h264_cpu]
     elif encoder_preference == 'av1':
         if use_gpu:
-            return [av1_nvenc, av1_cpu]
+            return [av1_nvenc, av1_vaapi, av1_cpu]
         return [av1_cpu]
     else:  # auto - H.264 first (faster), AV1 as fallback
         if use_gpu:
@@ -577,6 +590,7 @@ def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_pat
     """
     # Insert -progress pipe:1 before output file (last arg)
     cmd_with_progress = cmd[:-1] + ['-progress', 'pipe:1'] + [cmd[-1]]
+    logger.info(cmd_with_progress)
 
     process = sp.Popen(cmd_with_progress, stdout=sp.PIPE, stderr=None, text=True)
     last_update = 0
@@ -651,11 +665,13 @@ def _build_transcode_command(video_path, out_path, height, encoder):
     if 'extra_args' in encoder:
         cmd.extend(encoder['extra_args'])
 
-    # Adds AMD specific VF arguments because AMD GPUs need everything they work with in VRAM.
+    # Adds VAAPI specific -vf arguments because AMD and Intel GPUs need everything they work with in VRAM.
     if 'vaapi' in encoder['video_codec']:
         vf_idx = encoder['extra_args'].index('-vf') + 1
         encoder['extra_args'][vf_idx] += f',scale_vaapi=w=-2:h={height}'
         cmd.extend(encoder['extra_args'])
+
+    # Default fallback for CPU or NVENC
     else:
         cmd.extend(['-vf', f'scale=-2:{height}'])
 
