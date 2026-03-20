@@ -540,10 +540,24 @@ def _get_encoder_candidates(use_gpu=False, encoder_preference='auto'):
         'audio_bitrate': '96k',
         'extra_args': ['-preset', 'p4', '-cq:v', '30']
     }
+    h264_vaapi = {
+        'name': 'H.264 VA-API',
+        'video_codec': 'h264_vaapi',
+        'audio_codec': 'aac',
+        'audio_bitrate': '128k',
+        'extra_args': [
+            '-init_hw_device', 'vaapi',
+            '-vf', 'format=nv12,hwupload',
+            '-qp', '23',
+            '-compression_level', '4',
+            '-profile:v', 'high'
+        ]
+    }
+
 
     if encoder_preference == 'h264':
         if use_gpu:
-            return [h264_nvenc, h264_cpu]
+            return [h264_nvenc, h264_vaapi, h264_cpu]
         return [h264_cpu]
     elif encoder_preference == 'av1':
         if use_gpu:
@@ -551,7 +565,7 @@ def _get_encoder_candidates(use_gpu=False, encoder_preference='auto'):
         return [av1_cpu]
     else:  # auto - H.264 first (faster), AV1 as fallback
         if use_gpu:
-            return [h264_nvenc, av1_nvenc, h264_cpu, av1_cpu]
+            return [h264_nvenc, h264_vaapi, av1_nvenc, h264_cpu, av1_cpu]
         return [h264_cpu, av1_cpu]
 
 def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_path=None):
@@ -564,7 +578,7 @@ def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_pat
     # Insert -progress pipe:1 before output file (last arg)
     cmd_with_progress = cmd[:-1] + ['-progress', 'pipe:1'] + [cmd[-1]]
 
-    process = sp.Popen(cmd_with_progress, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+    process = sp.Popen(cmd_with_progress, stdout=sp.PIPE, stderr=None, text=True)
     last_update = 0
     speed = None
     percent = None
@@ -636,8 +650,15 @@ def _build_transcode_command(video_path, out_path, height, encoder):
     
     if 'extra_args' in encoder:
         cmd.extend(encoder['extra_args'])
-    
-    cmd.extend(['-vf', f'scale=-2:{height}'])
+
+    # Adds AMD specific VF arguments because AMD GPUs need everything they work with in VRAM.
+    if 'vaapi' in encoder['video_codec']:
+        vf_idx = encoder['extra_args'].index('-vf') + 1
+        encoder['extra_args'][vf_idx] += f',scale_vaapi=w=-2:h={height}'
+        cmd.extend(encoder['extra_args'])
+    else:
+        cmd.extend(['-vf', f'scale=-2:{height}'])
+
     cmd.extend(['-c:a', encoder['audio_codec'], '-b:a', encoder.get('audio_bitrate', '128k')])
     cmd.append(str(out_path))
     
