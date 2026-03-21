@@ -13,7 +13,7 @@ RUN npm run build
 FROM nvidia/cuda:11.8.0-devel-ubuntu22.04 as ffmpeg-builder
 WORKDIR /tmp
 
-# Install build dependencies
+# Install build dependencies + VA-API headers
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -32,6 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass-dev \
     libfreetype6-dev \
     libmp3lame-dev \
+    libva-dev \
+    libdrm-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install NVIDIA codec headers for NVENC support
@@ -44,13 +46,15 @@ RUN git clone --depth 1 --branch n12.1.14.0 https://github.com/FFmpeg/nv-codec-h
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.tar.xz && \
     tar -xf ffmpeg-6.1.tar.xz
 
-# Configure FFmpeg with NVENC and all necessary encoders
+# Configure FFmpeg with NVENC, VA-API and all necessary encoders
 RUN cd ffmpeg-6.1 && \
     ./configure \
         --prefix=/usr/local \
         --enable-gpl \
         --enable-version3 \
         --enable-nonfree \
+        --enable-nonfree \
+        --enable-vaapi \
         --enable-ffnvcodec \
         --enable-libx264 \
         --enable-libx265 \
@@ -83,7 +87,7 @@ COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 COPY --from=ffmpeg-builder /usr/local/lib/lib* /usr/local/lib/
 
-# Install runtime dependencies
+# Install runtime dependencies including AMD and Intel GPU drivers
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
     nginx-extras supervisor \
@@ -94,9 +98,16 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     gosu \
     wget curl ca-certificates \
     tzdata \
+    # Default Codecs (CPU) \
     libx264-163 libx265-199 libvpx7 libaom3 \
     libopus0 libvorbis0a libvorbisenc2 \
     libass9 libfreetype6 libmp3lame0 \
+    # VA-API runtime & common \
+    libva2 libva-drm2 libva-x11-2 va-driver-all \
+    # Intel drivers (iHD and i965) \
+    intel-media-va-driver-non-free i965-va-driver \
+    # AMD drivers \
+    mesa-va-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks and configure library path
@@ -133,6 +144,7 @@ ENV TEMPLATE_PATH=/app/server/fireshare/templates
 ENV ADMIN_PASSWORD admin
 ENV TZ=UTC
 ENV LD_LIBRARY_PATH /usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+ENV LIBVA_DRIVERS_PATH /usr/lib/x86_64-linux-gnu/dri
 ENV PATH /usr/local/bin:$PATH
 
 EXPOSE 80

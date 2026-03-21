@@ -374,16 +374,19 @@ def create_poster(video_path, out_path, second=0):
 
 # Cache for NVENC availability check to avoid repeated subprocess calls
 _nvenc_availability_cache = {}
+# Cache for VAAPI availability check
+_vaapi_availability_cache = {}
 
 # Cache for the working encoder to avoid trying failed encoders repeatedly
 # Format: {'gpu': encoder_dict, 'cpu': encoder_dict}
 # where encoder_dict contains 'name', 'video_codec', 'audio_codec', 'extra_args'
 _working_encoder_cache = {'gpu': None, 'cpu': None}
 
-def clear_nvenc_cache():
-    """Clear the NVENC availability cache to force a re-check."""
-    global _nvenc_availability_cache
+def clear_gpu_encoder_cache():
+    """Clear the HW accelerated availability cache to force a re-check."""
+    global _nvenc_availability_cache, _vaapi_availability_cache
     _nvenc_availability_cache = {}
+    _vaapi_availability_cache = {}
 
 def clear_encoder_cache():
     """Clear the working encoder cache to force encoder re-detection."""
@@ -464,6 +467,15 @@ def check_nvenc_available(encoder=None):
         return _nvenc_availability_cache[cache_key]
     
     try:
+        # Check for NVIDIA hardware access first using nvidia-smi
+        # This ensures NVENC is not even tried if the GPU is not passed to the container
+        sp.run(['nvidia-smi', '-L'], capture_output=True, check=True, timeout=5)
+    except (sp.SubprocessError, FileNotFoundError):
+        # nvidia-smi failed or not found -> no NVIDIA GPU accessible
+        _nvenc_availability_cache[cache_key] = False
+        return False
+
+    try:
         # Try to get the list of encoders from ffmpeg
         result = sp.run(
             ['ffmpeg', '-hide_banner', '-encoders'],
@@ -490,7 +502,41 @@ def check_nvenc_available(encoder=None):
         _nvenc_availability_cache[cache_key] = False
         return False
 
+def check_vaapi_available():
+    """
+    Check if VA-API (Intel/AMD GPU encoding) is available.
 
+    Args:
+
+
+    Returns:
+        bool: True if the VA-API encoder is available and ffmpeg has VA-API, False otherwise
+    """
+    if 'vaapi' in _vaapi_availability_cache:
+        return _vaapi_availability_cache['vaapi']
+
+    # Check if render node exists (indicates if Hardware is present)
+    if not os.path.exists('/dev/dri/renderD128'):
+        _vaapi_availability_cache['vaapi'] = False
+        return False
+
+    # Check if ffmpeg has VA-API support
+    try:
+        result = sp.run(
+            ['ffmpeg', '-hide_banner', '-encoders'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            available = 'h264_vaapi' in result.stdout
+            _vaapi_availability_cache['vaapi'] = available
+            return available
+    except Exception:
+        pass
+
+    _vaapi_availability_cache['vaapi'] = False
+    return False
 
 def transcode_video(video_path, out_path):
     s = time.time()
@@ -568,18 +614,35 @@ def _get_encoder_candidates(use_gpu=False, encoder_preference='auto'):
         ]
     }
 
+    candidates = []
+    
+    # Check availability once if GPU is requested
+    nvenc_ok = False
+    vaapi_ok = False
+    if use_gpu:
+        nvenc_ok = check_nvenc_available()
+        vaapi_ok = check_vaapi_available()
+
     if encoder_preference == 'h264':
         if use_gpu:
-            return [h264_nvenc, h264_vaapi, h264_cpu]
-        return [h264_cpu]
+            if nvenc_ok: candidates.append(h264_nvenc)
+            if vaapi_ok: candidates.append(h264_vaapi)
+        candidates.append(h264_cpu)
+        
     elif encoder_preference == 'av1':
         if use_gpu:
-            return [av1_nvenc, av1_vaapi, av1_cpu]
-        return [av1_cpu]
+            if nvenc_ok: candidates.append(av1_nvenc)
+            if vaapi_ok: candidates.append(av1_vaapi)
+        candidates.append(av1_cpu)
+        
     else:  # auto - H.264 first (faster), AV1 as fallback
         if use_gpu:
-            return [h264_nvenc, h264_vaapi, av1_nvenc, h264_cpu, av1_cpu]
-        return [h264_cpu, av1_cpu]
+            if nvenc_ok: candidates.append(h264_nvenc)
+            if vaapi_ok: candidates.append(h264_vaapi)
+            if nvenc_ok: candidates.append(av1_nvenc)
+        candidates.extend([h264_cpu, av1_cpu])
+
+    return candidates
 
 def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_path=None):
     """
@@ -590,9 +653,8 @@ def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_pat
     """
     # Insert -progress pipe:1 before output file (last arg)
     cmd_with_progress = cmd[:-1] + ['-progress', 'pipe:1'] + [cmd[-1]]
-    logger.info(cmd_with_progress)
 
-    process = sp.Popen(cmd_with_progress, stdout=sp.PIPE, stderr=None, text=True)
+    process = sp.Popen(cmd_with_progress, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
     last_update = 0
     speed = None
     percent = None
@@ -772,8 +834,8 @@ def transcode_video_quality(video_path, out_path, height, use_gpu=False, timeout
     
     # No cached encoder - need to detect a working encoder
     # Check if GPU is requested but NVENC is not available in ffmpeg
-    if use_gpu and not check_nvenc_available():
-        logger.warning("GPU transcoding requested but NVENC not available in ffmpeg")
+    if use_gpu and not check_nvenc_available() and not check_vaapi_available():
+        logger.warning("GPU transcoding requested but no supported GPU (NVENC/VAAPI) was detected")
         
         # Run diagnostics to help user understand the issue
         diag = diagnose_nvenc_setup()
@@ -796,7 +858,7 @@ def transcode_video_quality(video_path, out_path, height, use_gpu=False, timeout
                     logger.info(f"Automatically added {library_dir} to LD_LIBRARY_PATH")
                     
                     # Clear the cache and retry the check
-                    clear_nvenc_cache()
+                    clear_gpu_encoder_cache()
                     
                     if check_nvenc_available():
                         logger.info("✓ NVENC is now available! Continuing with GPU transcoding")
