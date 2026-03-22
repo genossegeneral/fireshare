@@ -470,7 +470,7 @@ def check_nvenc_available(encoder=None):
         # Check for NVIDIA hardware access first using nvidia-smi
         # This ensures NVENC is not even tried if the GPU is not passed to the container
         sp.run(['nvidia-smi', '-L'], capture_output=True, check=True, timeout=5)
-    except (sp.SubprocessError, FileNotFoundError):
+    except (sp.SubprocessError, FileNotFoundError, PermissionError):
         # nvidia-smi failed or not found -> no NVIDIA GPU accessible
         _nvenc_availability_cache[cache_key] = False
         return False
