@@ -13,6 +13,10 @@ useradd appuser 2>/dev/null || true
 groupmod -o -g "$PGID" appuser
 usermod -o -u "$PUID" appuser
 
+# Add user appuser to group video (needed for VAAPI transcoding of /dev/dri render nodes)
+usermod -aG video appuser || true # AMD render node belongs to group video
+usermod -aG render appuser || true # Intel render node belongs to group render
+
 # Set ownership of directories
 chown_fail=0
 if ! chown -R appuser:appuser "$DATA_DIRECTORY" 2>/dev/null; then
@@ -49,6 +53,7 @@ echo "Nginx started successfully"
 # Ensure PATH and LD_LIBRARY_PATH are set
 export PATH=/usr/local/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+export LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
 
 # Run migrations as appuser
 echo "Running database migrations..."
